@@ -28,8 +28,15 @@ class Progress:
     def mark_session_complete(self):
         self.record("session_complete", "", True, 0, set(), None)
 
-    def last_attempts(self, limit=10):
-        return self.db.execute("SELECT chord, success, round(seconds,1), distance FROM attempts WHERE exercise='chord' ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    def last_attempts(self, limit=10, *, include_exercise=False):
+        rows = self.db.execute(
+            """SELECT chord, success, round(seconds, 1), distance, exercise
+               FROM attempts
+               WHERE exercise IN ('chord', 'chord_guided', 'chord_recall', 'chord_skip')
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return rows if include_exercise else [row[:4] for row in rows]
 
     def close(self):
         self.db.close()

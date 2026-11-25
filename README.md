@@ -1,93 +1,36 @@
-# Musical Fluency Lab (MFL) — v0.1.0
+# Musical Fluency Lab 0.4.0
 
-A tiny, offline-first, MIDI-driven **guided** piano coach. Open the program; it tells you what to play. No scale picker, exercise menu, or account.
+An offline, MIDI-driven piano coach for learning to recall and play chords. Launch `mfl` with a keyboard connected. Listen to the opening voicing, then play it back.
 
-## What works in this first prototype
+## Practice
 
-- Automatically selects a MIDI input (prefers Launchkey / Roland, ignores DAW ports).
-- Recognizes three-note major/minor triads in any inversion or octave.
-- Guides you through a seven-step C–Am–F–G chord-recall session.
-- Shows a **voicing-distance proxy** in semitones between successive chords; MIDI cannot identify fingers.
-- Records successes, skips, response times, and voicings in a local SQLite database.
-- Ends with an invitation to play a song you love.
-- Works on Linux ALSA and macOS CoreMIDI when `python-rtmidi` is installed successfully.
+- The seven-chord session introduces C major, A minor, F major and G major, then revisits C, Am and G from memory.
+- Each new guided chord plays a short example through the default audio output. Your own notes sound as you play, with volume responding to how hard you press. Playing interrupts the example so you can start immediately.
+- The piano shows the voicing and the notes you hold. Play the displayed shape with all three notes held together. You can move the entire shape to another octave. The first matching note places the guide in that octave.
+- Recall hides the piano and starts without an example. Press **H** to bring back the guide and replay the example.
+- Two guided successes unlock recall. Release all keys between attempts. Recall accepts any inversion or octave of the three-note chord. After two missed recall attempts, the guide returns and leads back to recall.
+- Press **S** to skip, **R** to restart or **Q** to quit. The session ends with an invitation to play a favorite song. The controller keeps sounding while MFL is open.
 
-**Not yet implemented:** synthesized sound or backing tracks, ear-training playback, true spaced repetition, adaptive curriculum, resume of an interrupted session, chord recognition from arpeggios, or analysis of actual singing. The first release always starts the same guided seven-step session; previous attempts are retained. These are explicit next milestones.
+This version tracks guided attempts, unassisted recall and skips separately in the existing SQLite history. Movement in `mfl history` is the total semitone change between voicings. The database lives at `$XDG_DATA_HOME/mfl/progress.sqlite3` or defaults to `~/.local/share/mfl/progress.sqlite3`.
 
-## Install on Fedora 44
+The app starts the same session each time. It uses simultaneous three-note chords and has no sustain-pedal processing or interrupted-session resume. The built-in sound is synthesized locally and needs no soundfont download. If the audio device is unavailable, visual practice remains playable.
 
-If `python-rtmidi` needs compilation, install development dependencies first:
+## Install and run
 
-```bash
-sudo dnf install alsa-lib-devel python3-devel gcc-c++ pkgconf-pkg-config
-```
+From the repository directory, with Python 3.11 or later and `uv` available:
 
-Unzip the archive, enter the directory, then:
-
-```bash
-uv tool install --python /usr/bin/python3 .
-mfl devices
+```sh
+uv tool install --force .
 mfl
 ```
 
-For development instead:
+On Fedora 44, MIDI installation was tested with `uv tool install --force --python /usr/bin/python3 .`. A source build of `python-rtmidi` on that machine required ALSA and Python development headers. On Linux, software audio uses the system PortAudio library (`portaudio` on Arch and Fedora). On Omarchy, MFL opened the Launchkey Mini MK3 and rendered a demonstration to the default audio output. Apple Silicon still needs live verification.
 
-```bash
-uv sync --python /usr/bin/python3
-uv run mfl
-```
+- `mfl devices` lists available MIDI input ports.
+- `mfl --device Launchkey` selects a matching input if the automatic choice is wrong.
+- `mfl --silent` turns off software audio if your keyboard has its own sound.
+- `mfl history` shows recent attempts and completed sessions.
 
-If you modify code after installing, reinstall with `uv tool install --force --python /usr/bin/python3 .`.
+Run the automated tests with `uv run --with pytest pytest -q`.
 
-## Install on macOS (Apple Silicon)
-
-Install `uv` first, then in the unzipped directory:
-
-```bash
-uv tool install .
-mfl devices
-mfl
-```
-
-Depending on Python version and wheel availability, `python-rtmidi` may compile from source; that may require Xcode Command Line Tools. We'll verify on the M5 rather than promise a wheel exists.
-
-## Commands
-
-- `mfl`: launch the guided session
-- `mfl devices`: list MIDI input ports
-- `mfl history`: view recent attempts
-- `mfl --device Launchkey`: choose a matching input when needed
-- `q`: quit the interface; `r`: restart the session
-
-## Practice notes
-
-Use the Launchkey Mini with a connected computer. MIDI note events are input, not sound; this prototype does not produce audio. For the first exercise, play three notes **simultaneously** and hold them, then release all notes after success. A full piano is better for two-handed playing; the Mini is enough for these three-note challenges.
-
-Data lives at `~/.local/share/mfl/progress.sqlite3` on Linux (or `$XDG_DATA_HOME/mfl/progress.sqlite3` when set). On macOS the same fallback path is used. No data leaves the machine.
-
-## Known limitations
-
-- Notes must be held simultaneously: arpeggios do not count as chords yet.
-- The exercise recognizes exactly three held MIDI notes. Doubling a note in another octave is not accepted.
-- There is no sustain-pedal processing yet.
-- Skipping records a failed attempt; restarting doesn't erase history.
-- An interrupted session restarts at step 1; resumable sessions are planned.
-- Input-device auto-selection is best-effort. If it selects the wrong port, use `--device`.
-
-## Roadmap
-
-1. Resume interrupted sessions and adapt the daily plan based on past attempts.
-2. Audio cues and short listen–sing–play challenges.
-3. Spaced retrieval and new-key transfer tests.
-4. Accompaniment patterns and expressive playing with a singer.
-5. Cross-platform CI builds and GitHub releases.
-
-License: MIT (see LICENSE).
-
-## v0.2 guided learning preview
-
-This version adds a **show → guided play → recall** sequence. During the guided stage, a chromatic two-octave note grid shows the target MIDI notes (◆) and the notes you play (●). It gives feedback on missing notes. The first four chords demonstrate specific economical voicings, while the final three prompts start in recall mode. You can request the guide again at any time.
-
-**Important:** This is a text-based chromatic note grid, not yet a graphical piano with black/white keys or audio demonstrations. Live note feedback and lessons are a first iteration. The app still restarts the fixed session on launch and does not yet have adaptive scheduling.
-
-Upgrade from the extracted folder using `uv tool install --force --python /usr/bin/python3 .`.
+License is MIT. See [LICENSE](LICENSE).

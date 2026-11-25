@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "musical-fluency-lab"
-version = "0.2.0"
+version = "0.4.0"
 description = "A guided, MIDI-powered piano fluency coach"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["textual>=0.80", "typer>=0.12", "python-rtmidi>=1.5"]
+dependencies = ["textual>=0.80", "typer>=0.12", "python-rtmidi>=1.5", "numpy>=1.26", "sounddevice>=0.5"]
 
 [project.scripts]
 mfl = "mfl.cli:app"
