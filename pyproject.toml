@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "musical-fluency-lab"
+version = "0.2.0"
+description = "A guided, MIDI-powered piano fluency coach"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["textual>=0.80", "typer>=0.12", "python-rtmidi>=1.5"]
+
+[project.scripts]
+mfl = "mfl.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mfl"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
