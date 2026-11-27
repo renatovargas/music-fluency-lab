@@ -25,27 +25,49 @@ The owner is an experienced programmer/economist, not a beginning musician. He c
 
 ## Handover and current implementation
 
-The original handover was prepared on 2026-11-24 from the v0.2.0 ZIP. The owner successfully ran v0.1 and v0.2 on Fedora. v0.1 felt like an examiner, and v0.2 introduced guidance but required an intermediate click that made it unclear when to play. The current checkout implements v0.3 and v0.4. Inspect the working tree and tests before editing, and preserve unrelated owner changes.
+The original handover was prepared on 2026-11-24 from the v0.2.0 ZIP. The owner successfully ran v0.1 and v0.2 on Fedora. v0.1 felt like an examiner, and v0.2 introduced guidance but required an intermediate click that made it unclear when to play. v0.3 removed the click, and v0.4 added sound. The v0.4 feedback (too quiet; a double sound after blind recall) was addressed in v0.5, which the current checkout implements. Inspect the working tree and tests before editing, and preserve unrelated owner changes.
 
-### Current implementation (v0.4.0)
+### Current implementation (v0.5.0)
 
-- `src/mfl/cli.py` launches practice by default, supports `--device` and `--silent`, and provides `devices` and `history`. `src/mfl/midi.py` auto-selects a suitable input, prefers Launchkey/Roland, ignores DAW and MIDI Through ports, and treats zero-velocity note-on as note-off.
-- `src/mfl/coach.py` runs the fixed C–Am–F–G–C–Am–G session. The first four chords open in playable guidance, and the final three open in recall. The current defaults are two guided successes before recall and two missed recalls before guidance returns. Release separates attempts. Hint restores playable guidance, and skip remains available.
-- `src/mfl/tui.py` uses Textual and polls MIDI every 20 ms. `src/mfl/keyboard.py` draws octave-aware black and white keys with distinct target and held markers. The guide can move an entire voicing by octaves, displays B3, and shows notes outside the target range. Recall hides the piano diagram while keeping the held-note readout.
-- `src/mfl/audio.py` uses a local NumPy synth with sounddevice/PortAudio. Each new guided chord plays a short example. The learner's MIDI notes produce velocity-sensitive sound, including in recall and after session completion while the app stays open. Playing interrupts the demonstration. H replays it in guidance or restores guidance in recall. Audio startup failure leaves visual practice available.
-- `src/mfl/theory.py` handles pitch classes, note names, exact three-note triads, and the voicing-distance proxy. Guide shapes are C4–E4–G4, C4–E4–A4, C4–F4–A4 and B3–D4–G4. Guidance accepts the same shape shifted by octaves. Recall accepts any inversion or octave. Doubles, arpeggios and pedal processing are unsupported.
-- `src/mfl/storage.py` keeps SQLite history at `$XDG_DATA_HOME/mfl/progress.sqlite3` or `~/.local/share/mfl/progress.sqlite3`. It preserves legacy rows and distinguishes guided practice, recall and skips. Launch still starts the fixed lesson from the beginning. Session completion is not proof of mastery.
-- The 10 automated tests cover theory, coach release boundaries and recovery, register mapping, MIDI decoding, history compatibility, the headless Textual flow, and synth pitch and release. They use fake MIDI and temporary progress databases.
+v0.5 (2026-11-27) replaced the fixed seven-chord lesson with a daily adaptive coach. See `README.md` and `CHANGELOG.md`.
 
-### Hardware feedback and next task
+- **Layers:**
+  - `mfl.theory` (pure Python): spelled notes and intervals, scales and modes, 36 chord qualities with parsing and identification from MIDI, keys and Roman numerals (pop convention relative to the major scale, `V7/vi` secondaries, `I/3` slash basses), voice leading, `PROGRESSIONS`, `COMP_PATTERNS`, `GROOVES` and key estimation.
+  - `mfl.audio`: the engine and instruments.
+  - `mfl.exercises`: UI-agnostic state machines.
+  - `mfl.curriculum`: 21 units and 108 skills with stable IDs (`chord/F#m`, `prog/axis/G`, `groove/tresillo`, `ear/degrees/135`, `ear/echo/4`, `ear/chords/vi`).
+  - `mfl.srs`: SM-2 style scheduling with grades 1–4 derived from performance.
+  - `mfl.planner`: the daily plan.
+  - `mfl.session`: runs the plan, records results, re-queues failures and resumes.
+  - `mfl.ui.app`: the Textual front end. `mfl.tui` is a shim for it.
+- **Plan:** Warm-up (due chords, interleaved, sometimes asked by Roman numeral), Learn (new items, chords weighted 0.5, at most 5 weighted), Navigate (walks → play-along with cues fading from symbols to Roman numerals to none, plus ungraded consolidation play-alongs for today's new progressions), Ear, then free play. The default is 30 minutes of structured practice (owner request), then open-ended free play.
+- **Exercises:** chord (probe 6 s → guided → recall; the guide accepts the shape in any octave plus a lower left-hand chord tone; recall accepts any inversion or doubling, may omit the fifth of 4+ note chords, and slash chords need their bass), walk (legato changes allowed), play-along (count-in, optional example pass, drums and bass, hit clustering, timing windows, learned `timing_offset` setting), degrees, echo, chord-by-ear, and free play.
+- **Audio:**
+  - 44.1/48 kHz stereo, 256-frame blocks.
+  - Additive piano and FM electric piano are rendered every 3 semitones and resampled. Organ and pad are real-time wavetables.
+  - Drums are GM numbers. A synthetic IR feeds the convolution reverb, followed by a limiter. `MASTER_GAIN` 3.2 makes a medium triad about −15 dBFS RMS, roughly 10 dB louder than v0.4.
+  - Samples are cached in `~/.cache/mfl/samples-vN`. Bump `RENDER_VERSION` when changing synthesis.
+  - The demo gate (`exercises.base.Context`) waits 0.75 s after the last release, and live note-on cancels demos. Backing tracks use the `backing` tag and are not cancelled.
+  - The device opens on a background thread.
+  - CPU is about 11–17% of one core with 10 voices. No underflows were observed during cold sample rendering on Omarchy.
+- **MIDI:** rtmidi callback with perf_counter timestamps, CC64 as the pedal, channel-10 notes as pads (they play drums and are ignored by exercises), and reconnect retries every 2 s.
+- **Storage:** `PRAGMA user_version` 1 adds `skills`, `results`, `sessions` and `settings`. The legacy `attempts` table is preserved, and legacy successful recalls seed `chord/<symbol>` skills.
+- **Tests:** 47 tests with fake MIDI, fake audio and temporary databases (`tests/helpers.py` has `FakeAudio`, `Clock` and `Rig`).
 
-The owner installed v0.4 on Omarchy with `uv tool install --force --python /usr/bin/python3 .` and confirmed that the Launchkey Mini MK3 produces sound. No system package installation was needed on that machine. The sound is a little quiet. After a successful blind recall, the next guided example begins as the learner's notes are still audible, producing a double sound. The owner chose to stop for the day with both issues open.
+### Hardware status and next task
 
-On the next audio pass, check playback gain on hardware and leave a clear audible gap between the learner's release and the next demonstration. Keep MIDI input responsive, cancel pending examples when the learner starts playing, and verify both the automatic handoff and hint replay.
+- Verified on Omarchy in a pseudo-terminal with the Launchkey Mini MK3 connected: the app auto-selects the MIDI port, opens audio (default device, 44.1 kHz) and exits cleanly. A 4-bar band stress test during cold sample rendering produced no underflows.
+- Not yet verified by playing:
+  - the musical feel of the new sounds and levels;
+  - whether play-along timing judgement feels fair with real PipeWire latency (`timing_offset` self-calibrates within ±120 ms);
+  - Launchkey pad channel and pedal behaviour;
+  - Fedora and macOS hardware.
+
+Next, ask the owner to play a few sessions and report sound quality, pacing (new items per day, session length) and whether the grading feels fair. Then continue the roadmap below.
 
 ## Subsequent roadmap
 
-1. **Persistent coach and resume.** Separate lesson policy/state from UI and MIDI. Persist session/step/phase, skill state and attempts with backward-compatible migrations. Resume automatically after interruption, choose the next daily lesson based on actual performance, and avoid endless repetition of the same seven chords. Use stable exercise IDs and distinguish skips, guided attempts, recall and assessment. Keep data local; no account or network requirement.
+1. **Persistent coach and resume.** Largely done in v0.5: skill state, results, sessions, a daily planner and same-day resume. Remaining: resume mid-exercise rather than restarting it, and an explicit placement assessment.
 2. **Audio and ear–hand training.** Build on the local synth to teach with original phrases: listen → imagine/sing → play; progressively remove visual cues. Add screen-off or auditory-only tests. Singing cannot be verified from MIDI alone; microphone analysis would be a separate optional capability.
 3. **Retrieval and harmonic navigation.** Spaced review across days, interleaving familiar and new keys, short targeted transition exercises, harmonic prediction and disappearing chord charts (symbols → functions → bass cues → no cues). Use functional harmony, not isolated scale drills. Test unfamiliar progressions and keys to measure transfer. Adapt challenge based on accuracy, response time and hint dependence; do not confuse quick responses with learning.
 4. **Accompaniment and creativity.** Train reusable pop/rock, Latin pop, ballad and bolero-inspired patterns, economical voice leading, bass movement, rhythmic stability, dynamics, intros/fills, and transposition. Gradually introduce sevenths, ninths, secondary dominants and chromatic approaches. Add constrained improvisation, motif development and an imaginary singer (original melody with pauses and delayed entrances) to teach listening and responsive accompaniment. Keep Mini-compatible tasks and larger-keyboard tasks separate where necessary.
