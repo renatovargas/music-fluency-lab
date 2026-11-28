@@ -1,7 +1,9 @@
 """The practice session: today's plan, run one exercise after another.
 
-UI-agnostic. A front end feeds MIDI events and clock ticks, calls hint/skip,
-and renders ``view()``. The session records results, updates spaced-
+UI-agnostic. A front end feeds MIDI events and clock ticks, calls hint/skip/
+back/repeat, and renders ``view()``. Each new kind of exercise opens with an
+intro card that says, in plain words, what to do; the learner starts it by
+playing any key, so nothing begins before they are ready. The session records results, updates spaced-
 repetition state, saves its position for resume, and re-queues an item later
 in the session when it went badly.
 """
@@ -18,7 +20,7 @@ from mfl.exercises import Context, Exercise, Result, View, build
 from mfl.planner import BLOCKS, describe, estimate_minutes, plan_session
 from mfl.storage import Progress
 
-TRANSITION = 1.8  # seconds to show a result before moving on
+TRANSITION = 3.0  # seconds to show "exercise complete" before moving on
 IDLE = 90.0  # seconds without input after which practice time stops counting
 
 
@@ -70,6 +72,7 @@ class Practice:
             self.session_id = store.create_session(day, self.plan)
             self.position = 0
             self.resumed = False
+        self._ensure_sync()
         self.state = "welcome"
         self.exercise: Exercise | None = None
         self.last_view: View | None = None
@@ -82,6 +85,28 @@ class Practice:
         self.last_tick = clock()
         self.streak = streak(store.practice_days(), self.today)
         self.completed_now = False
+        self.last_run: tuple[str, bool] | None = None  # (kind, new) of the last exercise started
+        self.finished_position: int | None = None
+
+    def sync_needed(self) -> bool:
+        """True until a sound check has been done with the current audio buffer."""
+        from mfl.exercises.sync import VERSION
+
+        sync = self.store.setting("sync")
+        return (not isinstance(sync, dict) or sync.get("version") != VERSION
+                or sync.get("latency") != self.store.setting("audio_latency", None))
+
+    def _ensure_sync(self):
+        """Put a short sound check before the first band exercise when needed."""
+        rest = self.plan[self.position:]
+        if not self.sync_needed() or any(i["kind"] == "sync" for i in rest):
+            return
+        for index, item in enumerate(rest, self.position):
+            if item["kind"] == "playalong":
+                self.plan.insert(index, {"kind": "sync", "skill": "sync", "block": item.get("block", "Navigate"),
+                                         "mode": "practice", "graded": False})
+                self.store.update_session(self.session_id, plan=self.plan)
+                return
 
     # ---- plan helpers ---------------------------------------------------------------
     @property
@@ -132,6 +157,8 @@ class Practice:
                 self.ctx.last_release = now
                 if self.state == "welcome":
                     self.begin(now)
+                elif self.state == "intro":
+                    self._start_current(now)
                 elif self.state == "exercise" and self.exercise is not None:
                     self.exercise.released(now)
         self._check_done(now)
@@ -148,7 +175,7 @@ class Practice:
             self._check_done(now)
         elif self.state == "between":
             if now - self.result_at >= TRANSITION and not self.ctx.held:
-                self._start_current(now)
+                self._prepare(now)
 
     def hint(self, now: float | None = None):
         now = self.clock() if now is None else now
@@ -160,7 +187,7 @@ class Practice:
         if self.state == "welcome":
             self.begin(now)
             return
-        if self.state != "exercise" or self.exercise is None or self.exercise.kind == "free":
+        if self.state not in ("exercise", "intro") or self.exercise is None or self.exercise.kind == "free":
             return
         self.exercise.stop()
         self.store.add_result(skill=self.exercise.skill_id, kind=f"{self.exercise.kind}_skip", grade=0, score=None,
@@ -170,13 +197,79 @@ class Practice:
         self._advance(now)
 
     def restart_exercise(self, now: float | None = None):
+        """Start the current exercise again, or repeat the one just finished."""
         now = self.clock() if now is None else now
-        if self.state == "exercise":
+        if self.state in ("exercise", "intro"):
+            self._start_current(now)
+        elif self.state == "between" and self.finished_position is not None:
+            self._goto(self.finished_position, now, intro=False)
+
+    def back(self, now: float | None = None):
+        """Go back one step and show its explanation again."""
+        now = self.clock() if now is None else now
+        if self.state == "welcome":
+            return
+        if self.state == "between" and self.finished_position is not None:
+            target = self.finished_position
+        else:
+            target = max(0, self.position - 1)
+        self._goto(target, now, intro=True)
+
+    def change_tempo(self, delta: float, now: float | None = None) -> float:
+        """Make play-alongs slower or faster (a scale on written tempos). A
+        running play-along starts again at the new tempo."""
+        now = self.clock() if now is None else now
+        scale = self.ctx.set_tempo_scale(self.ctx.tempo_scale + delta)
+        ex = self.exercise
+        if ex is not None and ex.kind == "playalong":
+            if self.state == "intro":
+                self.exercise = build(self.item, self.ctx)
+            elif self.state == "exercise":
+                self._start_current(now)
+        return scale
+
+    def nudge_timing(self, delta: float) -> float:
+        """Shift the play-along lane (and timing judgement) by hand: positive
+        draws it later, for when the cursor reaches a beat before you hear it."""
+        from mfl.exercises.sync import save_sync
+
+        self.ctx.save_timing_offset(self.ctx.timing_offset + delta)
+        sync = self.store.setting("sync")
+        latency = sync.get("latency") if isinstance(sync, dict) else self.store.setting("audio_latency", None)
+        save_sync(self.store, self.ctx.timing_offset, latency)
+        return self.ctx.timing_offset
+
+    def _goto(self, position: int, now: float, intro: bool):
+        if self.exercise is not None:
+            self.exercise.stop()
+        self.position = min(max(0, position), len(self.plan) - 1)
+        self.store.update_session(self.session_id, position=self.position, add_seconds=self._unsaved_seconds())
+        self.last_result = None
+        if intro:
+            self._prepare(now, force_intro=True)
+        else:
             self._start_current(now)
 
     # ---- flow ----------------------------------------------------------------------------
     def begin(self, now: float):
         if self.state == "welcome":
+            self._prepare(now)
+
+    def needs_intro(self) -> bool:
+        item = self.item
+        if item["kind"] == "free":
+            return False
+        return self.last_run != (item["kind"], item.get("mode") == "new")
+
+    def _prepare(self, now: float, force_intro: bool = False):
+        """Show the next exercise's intro card when it is a new kind of task,
+        otherwise start it straight away."""
+        if force_intro or self.needs_intro():
+            if self.exercise is not None:
+                self.exercise.stop()
+            self.exercise = build(self.item, self.ctx)
+            self.state = "intro"
+        else:
             self._start_current(now)
 
     def _start_current(self, now: float):
@@ -185,6 +278,7 @@ class Practice:
         self.exercise = build(self.item, self.ctx)
         self.exercise.start(now)
         self.state = "exercise"
+        self.last_run = (self.item["kind"], self.item.get("mode") == "new")
         if self.exercise.kind == "free" and not self.completed_now:
             self.completed_now = True
             self.store.update_session(self.session_id, position=self.position, finished=True,
@@ -214,6 +308,7 @@ class Practice:
             self.plan.insert(insert_at, retry)
         self.last_result = result
         self.result_at = now
+        self.finished_position = self.position
         self._advance(now, show_result=True)
 
     def _skill_ids(self):
@@ -229,7 +324,7 @@ class Practice:
             self.state = "between"
             self.exercise = None
         else:
-            self._start_current(now)
+            self._prepare(now)
 
     def _unsaved_seconds(self) -> float:
         delta = self.active_seconds - self.saved_seconds
@@ -261,20 +356,36 @@ class Practice:
         return View(block="Today", title=title, big="MFL", caption="Musical Fluency Lab",
                     lesson="\n".join(lines), feedback="Play any key to begin.", tone="good")
 
+    def intro_view(self) -> View:
+        heading, why, steps = self.exercise.intro()
+        lesson = heading + ("\n" + why if why else "") + "\n\n" + "\n".join(
+            f"{i}. {step}" for i, step in enumerate(steps, 1))
+        if self.last_result is not None:
+            lesson = f"Last: {self.last_result.summary}\n\n" + lesson
+        return View(block=self.item.get("block", ""), title="What's next", lesson=lesson,
+                    feedback="When you're ready, play any key to start.  (B goes back, S skips)", tone="good")
+
     def view(self, now: float | None = None) -> SessionView:
         now = self.clock() if now is None else now
         next_up = ""
         if self.state == "welcome":
             view = self.welcome_view()
+        elif self.state == "intro" and self.exercise is not None:
+            view = self.intro_view()
         elif self.state == "between" and self.last_view is not None:
-            view = self.last_view
+            # A screen of its own, so the end of an exercise is unmistakable
+            # (reusing the exercise's screen looked as if it were still going).
             result = self.last_result
+            done = self.last_view
+            view = View(block=done.block, title="Exercise complete", big="★", big_tone="good",
+                        caption=done.title,
+                        lesson=f"Next: {describe(self.item)}. I'll explain it before it starts. "
+                               "Nothing to play right now.")
             if result is not None:
-                tone = "good" if result.grade >= srs.GOOD else "warn"
-                mark = "✓" if result.grade >= srs.GOOD else "↻"
-                view.feedback = f"{mark} {result.summary}"
-                view.tone = tone
-            next_up = describe(self.item)
+                good = result.grade >= srs.GOOD
+                view.feedback = (f"{'✓' if good else '↻ Coming back later today ·'} {result.summary}"
+                                 "   (R: do it again)")
+                view.tone = "good" if good else "warn"
         elif self.exercise is not None:
             view = self.exercise.view(now)
             if self.exercise.kind == "free" and self.completed_now and now - self.exercise.started < 6:

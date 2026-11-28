@@ -23,9 +23,25 @@ import numpy as np
 
 from mfl.audio.instruments import Instrument, WavetableInstrument, build_instruments, hz
 
-RENDER_VERSION = 5
+RENDER_VERSION = 6
 FAST_RELEASE = 0.05
-MASTER_GAIN = 3.2  # make-up gain ahead of the limiter (v0.4 was too quiet)
+# Make-up gain ahead of the limiter. v0.5 used 3.2, which kept the limiter
+# pulling ~6 dB on every block of ordinary playing, plus constant tanh
+# saturation: audible as a distorted, "torn speaker" sound. At 1.6 a loud
+# pedalled four-note chord peaks just under full scale at volume 100%, so the
+# limiter only catches extremes. Volume can go to 200% for small speakers.
+MASTER_GAIN = 1.6
+MAX_VOLUME = 2.0
+KNEE = 0.8  # the output stays linear below this level
+
+
+def velocity_gain(velocity: int) -> float:
+    """Loudness for a MIDI velocity. Small keyboards like the Launchkey Mini
+    send low velocities for ordinary touches; v0.7's (v/127)^1.5 made a
+    velocity-30 note 19 dB below full and some notes nearly vanished. A floor
+    keeps the softest touch about 12 dB down while preserving dynamics."""
+    v = max(1, min(127, velocity)) / 127
+    return 0.25 + 0.75 * v ** 1.6
 
 
 @dataclass(frozen=True)
@@ -80,6 +96,19 @@ class SampleBank:
                 except OSError:
                     pass
         self.samples[(root, layer)] = data
+
+    def load_cached(self):
+        """Load every sample already on disk (fast), rendering nothing."""
+        for root in self.roots:
+            for layer in self.instrument.layers:
+                if (root, layer) in self.samples:
+                    continue
+                path = self._path(root, layer)
+                if path is not None and path.exists():
+                    try:
+                        self.samples[(root, layer)] = np.load(path).astype(np.float32)
+                    except Exception:
+                        pass
 
     def warm(self, center: int = 62, stop: threading.Event | None = None):
         order = sorted(self.roots, key=lambda r: abs(r - center))
@@ -307,7 +336,7 @@ class Engine:
     drums and metronome, mixed into one stereo stream."""
 
     def __init__(self, rate: int = 48000, block: int = 256, *, disk_cache: bool = True, warm: bool = True,
-                 instrument: str = "piano", volume: float = 0.85):
+                 instrument: str = "piano", volume: float = 1.0):
         self.rate = rate
         self.block = block
         self.instruments = build_instruments()
@@ -337,7 +366,12 @@ class Engine:
         self.peak = 0.0
         self._stop = threading.Event()
         self._warm_thread: threading.Thread | None = None
-        # Make the central piano range and the drums available immediately.
+        # Samples cached by an earlier run load in well under a second. Without
+        # them a note would be pitch-shifted from a distant root until the
+        # background render reaches it, which sounds dull and warbly.
+        for bank in self.banks.values():
+            bank.load_cached()
+        # Make the central piano range available immediately.
         for root in (60,):
             for layer in self.instruments["piano"].layers:
                 self.banks["piano"].ensure(root, layer)
@@ -347,7 +381,8 @@ class Engine:
 
     # ---- background preparation -------------------------------------------------
     def _warm(self):
-        order = ["drums", "bass", self.keys_instrument, "piano", "epiano"]
+        # The learner's own sound first: it is what they hear on the first key.
+        order = [self.keys_instrument, "drums", "bass", "grand", "piano", "epiano"]
         seen = set()
         for key in order:
             if key in seen or key not in self.banks:
@@ -394,7 +429,7 @@ class Engine:
                 threading.Thread(target=self.banks[key].warm, daemon=True).start()
 
     def set_volume(self, volume: float):
-        self.volume = float(np.clip(volume, 0.0, 1.5))
+        self.volume = float(np.clip(volume, 0.0, MAX_VOLUME))
 
     def close(self):
         self._stop.set()
@@ -477,7 +512,7 @@ class Engine:
             if voice.note == note and voice.source == source and inst.pitched:
                 voice.release(int(0.03 * self.rate))
         velocity = int(np.clip(velocity, 1, 127))
-        gain = inst.gain * (velocity / 127) ** 1.5 * (0.55 if source == "demo" else 1.0) + 1e-4
+        gain = inst.gain * velocity_gain(velocity) * (0.55 if source == "demo" else 1.0) + 1e-4
         pan = float(np.clip((note - 64) / 70, -0.45, 0.45)) if inst.pitched else 0.0
         if isinstance(inst, WavetableInstrument):
             table = self._table(key, note)
@@ -563,16 +598,25 @@ class Engine:
             mix[0] += bus[0] * (1 - wet * 0.5) + wet * left
             mix[1] += bus[1] * (1 - wet * 0.5) + wet * right
         if send.any() or self.reverb.fdl.any():
-            mix += 0.5 * self.reverb.process(send)
+            mix += 0.4 * self.reverb.process(send)
         mix *= self.volume * MASTER_GAIN
-        # Peak limiter: instant attack, gentle release, then soft clip.
+        # Peak limiter: fast attack, smooth ~0.3 s release. It only acts on
+        # peaks above full scale, so normal playing passes through untouched.
         peak = float(np.abs(mix).max())
-        target = min(1.0, 0.92 / peak) if peak > 0 else 1.0
-        new_gain = target if target < self.limiter else min(1.0, self.limiter + 0.004)
-        ramp = np.linspace(self.limiter, new_gain, n, dtype=np.float32)
-        self.limiter = new_gain
-        mix *= ramp
-        np.tanh(mix * 1.05, out=mix)
+        target = min(1.0, 0.98 / peak) if peak > 0 else 1.0
+        if target < self.limiter:
+            new_gain = target
+        else:
+            new_gain = self.limiter + (target - self.limiter) * (1 - np.exp(-n / (0.3 * self.rate)))
+        if new_gain != 1.0 or self.limiter != 1.0:
+            mix *= np.linspace(self.limiter, new_gain, n, dtype=np.float32)
+        self.limiter = float(new_gain)
+        # Soft knee: linear below KNEE, then a smooth curve towards 1.0, so the
+        # remaining overshoot of the gain ramp never clips hard.
+        over = np.abs(mix) > KNEE
+        if over.any():
+            x = mix[over]
+            mix[over] = np.sign(x) * (KNEE + (1 - KNEE) * np.tanh((np.abs(x) - KNEE) / (1 - KNEE)))
         self.peak = max(self.peak * 0.95, float(np.abs(mix).max()))
         self.frame += n
         return mix.T

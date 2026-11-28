@@ -125,10 +125,13 @@ def piano(view: PianoView, width: int = 80) -> Text:
                 result.append("▏", f"{EDGE} on {white_bg}")
                 continue
             ch, fg = " ", "#ffffff" if white_color else "#555049"
-            if row == 4 and col % w == 1:
-                if white in view.marks:
-                    ch = view.marks[white][0]
-                elif white_color:
+            if row == 4 and white in view.marks:
+                # Labels use the key's full width ("do", "sol"), not just one letter.
+                label = view.marks[white][: w - 1]
+                if 0 <= col % w - 1 < len(label):
+                    ch = label[col % w - 1]
+            elif row == 4 and col % w == 1:
+                if white_color:
                     ch = LETTERS[WHITE_PCS.index(white % 12)]
                 elif white % 12 in view.tonic_pcs:
                     ch, fg = "▪", TONIC

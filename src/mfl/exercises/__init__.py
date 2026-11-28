@@ -5,6 +5,7 @@ from mfl.exercises.chord import ChordExercise
 from mfl.exercises.ear import ChordEarExercise, DegreeExercise, EchoExercise
 from mfl.exercises.freeplay import FreePlay
 from mfl.exercises.progression import PlayAlongExercise, WalkExercise
+from mfl.exercises.sync import SyncExercise
 
 KINDS = {
     "chord": ChordExercise,
@@ -14,6 +15,7 @@ KINDS = {
     "echo": EchoExercise,
     "chordear": ChordEarExercise,
     "free": FreePlay,
+    "sync": SyncExercise,
 }
 
 

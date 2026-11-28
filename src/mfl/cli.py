@@ -14,11 +14,77 @@ def main(
     device: str = typer.Option(None, "--device", help="Optional MIDI device name substring"),
     silent: bool = typer.Option(False, "--silent", help="Practice without software audio"),
     minutes: float = typer.Option(None, "--minutes", help="Structured practice length (default 30)"),
+    latency: float = typer.Option(None, "--latency",
+                                  help="Audio buffer in seconds (default 0.045). Raise it, e.g. 0.08, if the "
+                                       "sound crackles; it is remembered. Raised automatically on dropouts."),
+    resync: bool = typer.Option(False, "--resync", help="Redo the tap-along sound check before the next band exercise"),
 ):
     if ctx.invoked_subcommand is None:
         from mfl.ui.app import MFLApp
 
+        if latency is not None:
+            from mfl.storage import Progress
+
+            store = Progress()
+            from mfl.audio import MAX_LATENCY, MIN_LATENCY
+
+            store.set_setting("audio_latency", max(MIN_LATENCY, min(MAX_LATENCY, latency)))
+            store.close()
+        if resync:
+            from mfl.storage import Progress
+
+            store = Progress()
+            store.set_setting("sync", None)
+            store.close()
         MFLApp(preferred=device, sound=not silent, minutes=minutes).run()
+
+
+@app.command("get-piano")
+def get_piano():
+    """Download a real sampled grand piano (FreePats YDP, 36 MB, CC-BY 3.0)."""
+    import hashlib
+    import tarfile
+    import urllib.request
+
+    from mfl.audio.soundfont import ATTRIBUTION, YDP_FILE, YDP_SHA256, YDP_URL, SoundFont, sounds_dir
+    from mfl.storage import Progress
+
+    folder = sounds_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / YDP_FILE
+    if not target.exists():
+        archive = folder / "download.tar.bz2"
+        typer.echo(f"Downloading the YDP Grand Piano (36 MB) from FreePats…")
+        request = urllib.request.Request(YDP_URL, headers={"User-Agent": "mfl"})
+        digest = hashlib.sha256()
+        with urllib.request.urlopen(request, timeout=60) as response, open(archive, "wb") as out:
+            while chunk := response.read(1 << 20):
+                digest.update(chunk)
+                out.write(chunk)
+        if digest.hexdigest() != YDP_SHA256:
+            archive.unlink(missing_ok=True)
+            typer.echo("The download didn't match the expected file. Nothing was installed.", err=True)
+            raise typer.Exit(1)
+        with tarfile.open(archive, "r:bz2") as tar:
+            member = next((m for m in tar.getmembers() if m.isfile() and m.name.endswith("/" + YDP_FILE)), None)
+            if member is None:
+                typer.echo("The archive has no piano SoundFont. Nothing was installed.", err=True)
+                raise typer.Exit(1)
+            source = tar.extractfile(member)
+            partial = target.with_suffix(".part")
+            with open(partial, "wb") as out:
+                while chunk := source.read(1 << 20):
+                    out.write(chunk)
+            partial.replace(target)
+        archive.unlink(missing_ok=True)
+    SoundFont(target)  # make sure it parses
+    (folder / "ATTRIBUTION.txt").write_text(ATTRIBUTION + "\n")
+    store = Progress()
+    store.set_setting("instrument", "grand")
+    store.close()
+    typer.echo(f"Installed: {target}")
+    typer.echo("It is now your keyboard sound (I cycles sounds while practising).")
+    typer.echo(ATTRIBUTION)
 
 
 @app.command()

@@ -1,12 +1,13 @@
-"""Single chord: probe what is known, teach what is not, then recall it."""
+"""Single chord. A new chord is taught first: listen, copy the highlighted
+keys, then play it from memory. A review asks for it from memory, and two
+misses bring the guide back. Nothing advances on a timer: the learner's
+playing moves every step."""
 
 from __future__ import annotations
 
 from mfl import srs
 from mfl.exercises.base import Exercise, PianoView, View, chord_events
 from mfl.theory import Key, comfortable_voicing, identify, parse_chord
-
-PROBE_SECONDS = 6.0
 
 
 def chord_lesson(chord) -> str:
@@ -35,6 +36,37 @@ def chord_lesson(chord) -> str:
     return text
 
 
+# Keys in the order they are most useful to mention (familiar ones first).
+CONTEXT_KEYS = ("C", "G", "Am", "F", "Em", "D", "Dm", "A", "Bb", "E", "Bm", "Eb", "Gm", "Cm")
+
+
+def chord_why(chord) -> str:
+    """Where this chord lives: its job in the keys that contain it."""
+    from mfl.theory import harmonic_function
+
+    roles = []
+    for text in CONTEXT_KEYS:
+        key = Key.parse(text)
+        if not chord.pcs <= set(key.scale.pcs):
+            continue
+        roman = key.analyze(chord)
+        # Skip ♭/♯ numerals (pop convention in minor keys): confusing as context.
+        if roman and "/" not in roman and "♭" not in roman and "♯" not in roman:
+            job = harmonic_function(roman, key.mode).split(":")[0].split("(")[0].strip()
+            roles.append(f"{roman} in {key.name} ({job})")
+        if len(roles) == 3:
+            break
+    sound = {"": "Major chords sound bright and settled.",
+             "m": "Minor chords sound darker and more tender.",
+             "7": "A dominant seventh is tense: it wants to move to the chord a fifth below.",
+             "maj7": "A major seventh sounds soft and open, the colour of many ballads.",
+             "m7": "A minor seventh sounds mellow and smooth.",
+             "sus4": "A suspended chord sounds unresolved: the ear waits for the third.",
+             "sus2": "A suspended chord sounds open and unresolved."}.get(chord.quality.suffix, "")
+    where = f"{chord.symbol} is " + ", ".join(roles) + "." if roles else ""
+    return " ".join(part for part in (where, sound) if part)
+
+
 class ChordExercise(Exercise):
     kind = "chord"
     block = "Warm-up"
@@ -45,18 +77,16 @@ class ChordExercise(Exercise):
         self.voicing = comfortable_voicing(self.chord, ctx.low, ctx.high)
         self.prompt_key = Key.parse(item["key"]) if item.get("key") else None
         self.roman = item.get("roman")
-        self.phase = "probe" if self.mode == "new" else "recall"
+        self.phase = "guided" if self.mode == "new" else "recall"
         self.block = "Learn" if self.mode == "new" else "Warm-up"
         self.accepted = False
         self.blocked = bool(ctx.held)
         self.attempt: set[int] = set()
         self.misses = 0
         self.guided_used = False
-        self.knew_it = False
         self.shift: int | None = None
         self.first_try = True
         self.attempt_start = 0.0
-        self.probe_deadline = 0.0
         self.recall_time = 0.0
 
     # ---- helpers ------------------------------------------------------------------------
@@ -91,11 +121,15 @@ class ChordExercise(Exercise):
     def start(self, now):
         super().start(now)
         self.attempt_start = now
-        self.probe_deadline = now + PROBE_SECONDS
-        if self.phase == "probe":
-            self.say("Know it? Play it now. Otherwise, wait and listen.", "info")
+        if self.phase == "guided":
+            self._guide(now, f"Listen to {self.chord.symbol}, then press the highlighted keys together.")
         else:
-            self.say("From memory. Any inversion or octave.", "info")
+            self.say(f"Play {self._asked()} from memory. Any order or octave is fine.", "info")
+
+    def _asked(self) -> str:
+        if self.roman and self.prompt_key:
+            return f"{self.roman} in {self.prompt_key.name}"
+        return self.chord.symbol
 
     # ---- MIDI -----------------------------------------------------------------------------
     def note_on(self, note, velocity, now):
@@ -115,15 +149,11 @@ class ChordExercise(Exercise):
         if correct:
             self.accepted = True
             elapsed = now - self.attempt_start
-            if self.phase == "probe":
-                self.knew_it = True
-                self.recall_time = elapsed
-                self.say(f"✓ You know it: {self.chord.spelled}", "good")
-            elif self.phase == "recall":
+            if self.phase == "recall":
                 self.recall_time = elapsed
                 self.say(f"✓ {self.chord.name}: {self.chord.spelled}", "good")
             else:
-                self.say("✓ That's the shape. Release, then play it from memory.", "good")
+                self.say("✓ That's it. Now let go of the keys.", "good")
 
     def released(self, now):
         if self.blocked:
@@ -131,29 +161,27 @@ class ChordExercise(Exercise):
             self.attempt.clear()
             return
         if self.accepted:
-            if self.phase in ("probe", "recall"):
+            if self.phase == "recall":
                 self._complete(now)
                 return
             self.phase = "recall"
             self.accepted = False
             self.attempt.clear()
-            self.say("Now from memory: same chord, any inversion.", "info")
+            self.say(f"Now the guide is hidden. Play {self.chord.symbol} again from memory.", "info")
             return
         if len(self.attempt) >= 2:
             played = identify(self.attempt)
             name = played[0].symbol if played else "that"
             self.first_try = False
-            if self.phase == "probe":
-                self._guide(now, f"You played {name}. Here's {self.chord.symbol}: listen, then copy the shape.")
-            elif self.phase == "recall":
+            if self.phase == "recall":
                 self.misses += 1
                 hint = self._difference(self.attempt)
                 if self.misses >= 2:
-                    self._guide(now, f"You played {name}. Let's look at it together.")
+                    self._guide(now, f"You played {name}. Let's look at it together: copy the highlighted keys.")
                 else:
-                    self.say(f"You played {name}. {hint}Try again.", "warn")
+                    self.say(f"You played {name}. {hint}Try again (H shows it).", "warn")
             else:
-                self.say("Not quite. Match the highlighted keys.", "warn")
+                self.say(f"You played {name}. Press only the highlighted keys, all together.", "warn")
         self.attempt.clear()
 
     def _difference(self, notes) -> str:
@@ -162,11 +190,6 @@ class ChordExercise(Exercise):
             return f"Missing: {', '.join(missing)}. "
         return ""
 
-    def tick(self, now):
-        if self.phase == "probe" and not self.accepted and not self.ctx.held and not self.attempt:
-            if now >= self.probe_deadline:
-                self._guide(now, f"Here's {self.chord.symbol}. Listen, then play the highlighted keys.")
-
     def hint(self, now):
         if self.accepted:
             return
@@ -174,12 +197,10 @@ class ChordExercise(Exercise):
         if self.phase == "guided":
             self._demo(now)
         else:
-            self._guide(now, "Here's the shape. Play it, then try again from memory.")
+            self._guide(now, "Here's the shape. Copy the highlighted keys, then play it from memory.")
 
     def _complete(self, now):
-        if self.knew_it:
-            grade = srs.EASY if self.recall_time < 4.0 else srs.GOOD
-        elif self.mode == "new":
+        if self.mode == "new":
             grade = srs.GOOD if self.misses == 0 and self.hints == 0 else srs.HARD
         elif self.guided_used:
             grade = srs.AGAIN
@@ -193,10 +214,27 @@ class ChordExercise(Exercise):
         self.finish(now, grade, 1.0 if grade >= srs.GOOD else 0.5, summary,
                     {"misses": self.misses, "guided": self.guided_used, "time": round(self.recall_time, 2)})
 
+    def intro(self):
+        if self.mode == "new":
+            return (f"Learn a new chord: {self.chord.symbol} ({self.chord.name})", chord_why(self.chord), [
+                "Listen. I play the chord for you.",
+                "Copy it. Press the keys highlighted on the keyboard picture, all together. "
+                "Green means right, red means not in the chord.",
+                "Let go, then play it once more with the picture hidden. Any order or octave is fine.",
+            ])
+        return ("Chords from memory",
+                "Finding chords without looking them up is what lets you follow a singer or a song you half-know.", [
+            "A chord name appears in big letters (sometimes as a number in a key, like vi in C).",
+            "Play it. Any inversion or octave counts.",
+            "If you miss it twice, I show it to you again. H shows it any time.",
+        ])
+
     # ---- view -----------------------------------------------------------------------------
     def view(self, now) -> View:
         new = self.mode == "new"
-        title = {"probe": "New chord", "guided": "Copy the shape", "recall": "From memory"}[self.phase]
+        title = {"guided": "Copy the shape", "recall": "From memory"}[self.phase]
+        if new:
+            title = f"New chord · {title.lower()}"
         if self.roman and self.prompt_key and self.phase != "guided":
             big = self.roman
             caption = f"in {self.prompt_key.name}"

@@ -19,6 +19,8 @@ import random
 from mfl.audio.engine import NoteEvent
 
 DEMO_GAP = 0.75  # seconds of silence after release before a demonstration
+TEMPO_SCALE = 0.85  # default: a little slower than written while getting started
+TEMPO_RANGE = (0.6, 1.4)
 
 
 @dataclass
@@ -123,6 +125,13 @@ class Context:
         self.last_note_on = -math.inf
         self.demo_handle: Demo | None = None
         self.timing_offset = float(store.setting("timing_offset", 0.0)) if store is not None else 0.0
+        self.tempo_scale = float(store.setting("tempo_scale", TEMPO_SCALE)) if store is not None else 1.0
+
+    def set_tempo_scale(self, value: float) -> float:
+        self.tempo_scale = round(max(TEMPO_RANGE[0], min(TEMPO_RANGE[1], value)), 2)
+        if self.store is not None:
+            self.store.set_setting("tempo_scale", self.tempo_scale)
+        return self.tempo_scale
 
     # ---- demonstrations --------------------------------------------------------------
     def demo(self, events: list[NoteEvent], now: float, gap: float = DEMO_GAP,
@@ -170,7 +179,7 @@ class Context:
         self.audio.stop(tag)
 
     def save_timing_offset(self, value: float):
-        self.timing_offset = max(-0.12, min(0.12, value))
+        self.timing_offset = max(-0.2, min(0.8, value))
         if self.store is not None:
             self.store.set_setting("timing_offset", round(self.timing_offset, 4))
 
@@ -218,6 +227,11 @@ class Exercise:
     def view(self, now: float) -> View:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def intro(self) -> tuple[str, str, list[str]]:
+        """What this exercise is and what to do, in plain words, shown before
+        it starts: (heading, why it matters, numbered steps)."""
+        return self.kind.title(), "", []
+
     # Helpers.
     def say(self, text: str, tone: str = "info"):
         self.feedback, self.tone = text, tone
@@ -234,6 +248,9 @@ class Exercise:
 
 def chord_events(notes, start: float, duration: float, velocity: int = 78, roll: float = 0.0) -> list[NoteEvent]:
     return [NoteEvent(start + i * roll, n, velocity, duration - i * roll) for i, n in enumerate(sorted(notes))]
+
+
+KEY_CHORDS_NOTE = "These first chords only set the key. Just listen, don't play them."
 
 
 def cadence_events(key, start: float = 0.0, step: float = 0.55, low: int = 53, high: int = 72) -> tuple[list, float]:

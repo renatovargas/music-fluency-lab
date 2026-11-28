@@ -24,7 +24,7 @@ from mfl.theory import PROGRESSIONS, Key, parse_chord
 
 BLOCKS = ("Warm-up", "Learn", "Navigate", "Ear", "Play")
 BUDGET = {"Warm-up": 5.0, "Learn": 9.0, "Navigate": 9.0, "Ear": 7.0}
-MAX_NEW = 5
+MAX_NEW = 3  # weighted (a chord counts half): up to six new chords, or three bigger items
 TOTAL = 30.0  # minutes of structured practice before free play
 
 
@@ -38,6 +38,8 @@ def estimate_minutes(item: dict) -> float:
         prog = PROGRESSIONS[item["prog"]]
         bars = len(prog.bars) * (item.get("passes", 2) + (1 if item.get("listen") else 0)) + 1
         return bars * 4 * 60 / item.get("bpm", 70) / 60 + 0.4
+    if kind == "sync":
+        return 0.3
     if kind in ("degrees", "echo", "chordear"):
         return 0.4 * item.get("rounds", 5) + 0.3
     return 0.0
@@ -215,6 +217,8 @@ def describe(item: dict) -> str:
     kind = item["kind"]
     if kind == "free":
         return "Free play: a song you love"
+    if kind == "sync":
+        return "Sound check: tap along with clicks"
     title = skill.title if skill else item.get("skill", kind)
     tag = "new" if item.get("mode") == "new" else "with the band" if item.get("mode") == "practice" else ""
     if kind == "playalong":

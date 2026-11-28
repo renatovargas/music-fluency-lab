@@ -14,7 +14,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Static
 
 from mfl import __version__
-from mfl.audio import INSTRUMENT_NAMES, PLAYABLE, NullAudio
+from mfl.audio import DEFAULT_LATENCY, INSTRUMENT_NAMES, MAX_LATENCY, MIN_LATENCY, PLAYABLE, NullAudio
 from mfl.session import Practice
 from mfl.storage import Progress
 from mfl.ui.render import big_text, chart, chips, lane, meter, piano
@@ -57,20 +57,23 @@ class MFLApp(App):
     #big { width: auto; height: auto; }
     #caption { width: 1fr; height: 3; padding-left: 3; content-align: left middle; color: $text-muted; }
     #lesson { height: auto; margin-top: 1; color: $text-muted; }
+    #feedback { height: auto; margin-top: 1; padding: 0 1; border-left: thick $accent; }
     #chart, #lane, #chips, #piano { height: auto; margin-top: 1; }
-    #feedback { height: auto; margin-top: 1; }
     """
     BINDINGS = [
-        Binding("h", "hint", "Hint / replay"),
+        Binding("h", "hint", "Hint"),
+        Binding("r", "restart", "Repeat"),
+        Binding("b,backspace", "back", "Back"),
         Binding("s", "skip", "Skip"),
+        Binding("minus", "volume(-0.1)", "Vol−", key_display="-"),
+        Binding("plus,equals_sign", "volume(0.1)", "Vol+", key_display="+"),
+        Binding("left_square_bracket", "tempo(-1)", "Slower", key_display="["),
+        Binding("right_square_bracket", "tempo(1)", "Faster", key_display="]"),
         Binding("i", "instrument", "Sound"),
-        Binding("minus", "volume(-0.1)", "Vol −", show=False),
-        Binding("plus,equals_sign", "volume(0.1)", "Vol +", show=False),
+        Binding("full_stop", "nudge(0.02)", "Lane later", show=False),
+        Binding("comma", "nudge(-0.02)", "Lane earlier", show=False),
         Binding("g", "groove", "Drums", show=False),
-        Binding("left_square_bracket", "tempo(-4)", "Slower", show=False),
-        Binding("right_square_bracket", "tempo(4)", "Faster", show=False),
-        Binding("r", "restart", "Restart exercise", show=False),
-        Binding("p", "progress", "Progress"),
+        Binding("p", "progress", "Progress", show=False),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -90,6 +93,7 @@ class MFLApp(App):
         self.last_render = 0.0
         self.last_midi_try = 0.0
         self.dirty = True
+        self.dropout_check = (0.0, 0)  # (time, underflow count) at the last check
 
     # ---- setup -------------------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -102,20 +106,26 @@ class MFLApp(App):
             with Horizontal(id="bigrow"):
                 yield Static(id="big")
                 yield Static(id="caption")
+            # What to do right now sits directly under the chord, so the eye
+            # has one place to look; background explanation comes after.
+            yield Static(id="feedback")
             yield Static(id="lesson")
             yield Static(id="chart")
             yield Static(id="lane")
             yield Static(id="chips")
             yield Static(id="piano")
-            yield Static(id="feedback")
         yield Footer()
 
     def on_mount(self):
         theme = self.store.setting("theme", "tokyo-night")
         if theme in self.available_themes:
             self.theme = theme
-        instrument = self.store.setting("instrument", "piano")
-        volume = float(self.store.setting("volume", 0.85))
+        instrument = self.store.setting("instrument", PLAYABLE[0])
+        if instrument not in PLAYABLE:  # e.g. the sampled piano was removed
+            instrument = PLAYABLE[0]
+        # v0.6 changed the gain staging; v0.5's "volume" setting is not reused.
+        volume = float(self.store.setting("output_volume", 1.0))
+        latency = max(MIN_LATENCY, float(self.store.setting("audio_latency", None) or DEFAULT_LATENCY))
         if self.audio is None:
             self.audio = NullAudio()
             self.audio.set_instrument(instrument)
@@ -124,17 +134,17 @@ class MFLApp(App):
                 # Opening the device can take a second or two: do it off the UI thread.
                 self.audio_error = ""
                 self.audio_starting = True
-                threading.Thread(target=self._open_audio, args=(instrument, volume), daemon=True).start()
+                threading.Thread(target=self._open_audio, args=(instrument, volume, latency), daemon=True).start()
         self.audio.set_instrument(instrument)
         self._connect_midi()
         self.practice = Practice(self.store, self.audio, minutes=self.minutes)
         self.set_interval(0.01, self._poll)
         self.render_all()
 
-    def _open_audio(self, instrument: str, volume: float):
+    def _open_audio(self, instrument: str, volume: float, latency: float):
         try:
             from mfl.audio import open_audio
-            audio = open_audio(instrument, volume)
+            audio = open_audio(instrument, volume, latency)
         except Exception as error:  # visual practice still works
             message = (str(error).splitlines() or ["unavailable"])[0][:60]
             try:
@@ -188,6 +198,8 @@ class MFLApp(App):
         if self.midi is None and now - self.last_midi_try > 2.0:
             self._connect_midi()
             self.dirty = True
+        if now - self.dropout_check[0] > 2.0:
+            self._check_dropouts(now)
         events = self.midi.poll() if self.midi is not None else []
         for kind, note, value, t in events:
             practice.on_midi(kind, note, value, t)
@@ -197,6 +209,24 @@ class MFLApp(App):
         interval = 1 / 30 if timed else 0.25
         if events or self.dirty or now - self.last_render >= interval:
             self.render_all()
+
+    def _check_dropouts(self, now: float):
+        """Crackles mean the audio buffer is too small for this machine: raise
+        it automatically and remember it."""
+        audio = self.audio
+        count = getattr(audio, "underflows", 0)
+        _, previous = self.dropout_check
+        self.dropout_check = (now, count)
+        if not hasattr(audio, "reopen") or count - previous < 3 or audio.requested_latency >= MAX_LATENCY:
+            return
+        try:
+            latency = audio.reopen(min(MAX_LATENCY, round(audio.requested_latency * 1.5, 3)))
+        except Exception as error:
+            self.notify(f"Couldn't enlarge the audio buffer: {error}", severity="warning", timeout=4)
+            return
+        self.store.set_setting("audio_latency", latency)
+        self.dropout_check = (now, audio.underflows)
+        self.notify(f"Audio crackled, so I enlarged the buffer to {latency * 1000:.0f} ms (remembered).", timeout=4)
 
     def render_all(self):
         practice = self.practice
@@ -234,14 +264,19 @@ class MFLApp(App):
         status.append("   ")
         if getattr(self.audio, "available", False):
             status.append(f"Sound: {INSTRUMENT_NAMES.get(self.audio.keys_instrument, '')}", "#c8c8d8")
-            status.append(f"  vol {self.audio.volume:.0%} ", "#a0a0b0")
+            status.append(f"  volume {self.audio.volume:.0%} (+/-) ", "#a0a0b0")
             status.append(meter(self.audio.peak, 8))
+            if self.audio.underflows:
+                status.append(f"  ⚠ {self.audio.underflows} dropouts", "#e0b84a")
+            if hasattr(self.audio, "requested_latency"):
+                status.append(f"  buffer {self.audio.requested_latency * 1000:.0f} ms", "#55556a")
         elif self.audio_starting:
             status.append("Starting sound…", "#a0a0b0")
         elif self.audio_error:
             status.append(f"Audio off: {self.audio_error}", "#e5534b")
         else:
             status.append("Silent mode", "#a0a0b0")
+        status.append(f"   tempo {practice.ctx.tempo_scale:.0%} ([ ])", "#a0a0b0")
         status.append(f"   v{__version__}", "#55556a")
         self._set("status", status)
 
@@ -261,7 +296,8 @@ class MFLApp(App):
             big = Text(view.big, BIG_TONE.get(view.big_tone, "bold"))
         self._set("big", big or "")
         self._set("caption", Text(view.caption, "italic #a0a0b0"))
-        self._set("lesson", Text(view.lesson, "#9a9aac"))
+        intro = session.state == "intro"
+        self._set("lesson", Text(view.lesson, "#e6e6f0" if intro else "#9a9aac"))
         self._show("chart", chart(view.chart, width) if view.chart else None)
         self._show("lane", lane(view.lane, width) if view.lane else None)
         if view.ladder:
@@ -272,7 +308,7 @@ class MFLApp(App):
         else:
             self._show("chips", None)
         self._show("piano", piano(view.piano, width) if view.piano else None)
-        feedback = Text(view.feedback, TONE.get(view.tone, ""))
+        feedback = Text("▶ " + view.feedback if view.feedback else "", TONE.get(view.tone, "bold"))
         if session.next_up:
             feedback.append(f"\nNext: {session.next_up}", "#7a7a8c")
         self._set("feedback", feedback)
@@ -298,6 +334,10 @@ class MFLApp(App):
         self.practice.skip()
         self.dirty = True
 
+    def action_back(self):
+        self.practice.back()
+        self.dirty = True
+
     def action_restart(self):
         self.practice.restart_exercise()
         self.dirty = True
@@ -312,7 +352,8 @@ class MFLApp(App):
 
     def action_volume(self, delta: float):
         self.audio.set_volume(round(self.audio.volume + delta, 2))
-        self.store.set_setting("volume", self.audio.volume)
+        self.store.set_setting("output_volume", self.audio.volume)
+        self.notify(f"Volume {self.audio.volume:.0%}", timeout=1)
         self.dirty = True
 
     def action_groove(self):
@@ -323,11 +364,19 @@ class MFLApp(App):
         else:
             self.notify("Drums are available in free play at the end of the session.", timeout=2)
 
-    def action_tempo(self, delta: float):
+    def action_tempo(self, steps: int):
         exercise = self.practice.exercise
         if exercise is not None and exercise.kind == "free":
-            exercise.tempo(delta, time.perf_counter())
-            self.dirty = True
+            exercise.tempo(4 * steps, time.perf_counter())
+        else:
+            scale = self.practice.change_tempo(0.05 * steps)
+            self.notify(f"Tempo {scale:.0%} of written", timeout=1.5)
+        self.dirty = True
+
+    def action_nudge(self, delta: float):
+        offset = self.practice.nudge_timing(delta)
+        self.notify(f"Band lane shifted: {offset * 1000:+.0f} ms (remembered)", timeout=1.5)
+        self.dirty = True
 
     def action_progress(self):
         self.push_screen(ProgressScreen(self.store))

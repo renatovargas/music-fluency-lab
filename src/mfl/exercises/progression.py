@@ -23,6 +23,18 @@ CUE_WORDS = {
 }
 
 
+def progression_why(prog, key) -> str:
+    """One or two sentences: what the progression is for and where its
+    chords come from."""
+    pairs = []
+    for roman, chord in zip(prog.romans, prog.chords(key)):
+        if (roman, chord.symbol) not in pairs:
+            pairs.append((roman, chord.symbol))
+    chords = ", ".join(f"{symbol} ({roman})" for roman, symbol in pairs)
+    return (f"{prog.about} Here in {key.name}: {chords}. "
+            f"The numbers say which note of the {key.name} scale each chord is built on.")
+
+
 def cue_cell(cue: str, roman: str, symbol: str, revealed: bool = False) -> str:
     if revealed or cue in ("full", "symbols"):
         return symbol
@@ -170,6 +182,22 @@ class WalkExercise(Exercise):
         self.finish(now, grade, accuracy, summary,
                     {"median": round(median, 2), "accuracy": round(accuracy, 3), "cues": self.loops})
 
+    def intro(self):
+        steps = []
+        if self.listen:
+            steps.append("Listen. I play the whole progression once.")
+        steps += [
+            "Play the chord shown in big letters. Nothing is timed: take as long as you need.",
+            "When it's right, the next chord appears. Keep notes that two chords share held down, "
+            "and move only the fingers that have to move.",
+        ]
+        if len(self.loops) > 1:
+            steps.append("Each time round, the help fades: "
+                         + " → ".join(CUE_WORDS[c].split(".")[0].lower() for c in self.loops) + ".")
+        return (f"Walk through a progression: {self.prog.name} in {self.key.name}",
+                progression_why(self.prog, self.key),
+                steps + ["H shows the keys for the current chord."])
+
     def view(self, now) -> View:
         cue = self.cue
         revealed = self.position in self.hinted
@@ -222,7 +250,9 @@ class PlayAlongExercise(Exercise):
         self.key = Key.parse(item["key"])
         self.pattern = COMP_PATTERNS[item.get("pattern", "whole")]
         self.bpb = self.pattern.beats_per_bar
-        self.bpm = float(item.get("bpm", 70))
+        self.written_bpm = float(item.get("bpm", 70))
+        # The learner's tempo preference ([ and ]) scales every play-along.
+        self.bpm = max(40.0, round(self.written_bpm * ctx.tempo_scale))
         self.spb = 60.0 / self.bpm
         self.cue = item.get("cue", "symbols")
         self.groove = item.get("groove") or self.pattern.groove
@@ -231,7 +261,7 @@ class PlayAlongExercise(Exercise):
         timeline = self.prog.timeline(self.key, self.bpb)
         prog_beats = len(self.prog.bars) * self.bpb
         self.prog_beats = prog_beats
-        self.count_in = self.bpb
+        self.count_in = 2 * self.bpb  # two bars: slow clicks, then every beat
         # Chords across the whole performance: (start beat, length, roman, chord).
         self.chords = []
         for p in range(self.listen_passes + self.passes):
@@ -255,6 +285,8 @@ class PlayAlongExercise(Exercise):
         self.t0: float | None = None
         self.revealed = False
         self.errors: list[float] = []
+        self.armed = True  # False: wait for the learner before starting the band
+        self.empty_passes = 0
 
     def beat_at(self, now: float) -> float:
         return (now - self.t0) / self.spb if self.t0 is not None else -self.count_in
@@ -272,11 +304,34 @@ class PlayAlongExercise(Exercise):
         super().start(now)
         self.say(f"{self.pattern.name} at {self.bpm:.0f} BPM. Count-in: {self.bpb} clicks.", "info")
 
+    def intro(self):
+        cue = {"full": "the chord name and the keys to press",
+               "symbols": "the chord name",
+               "roman": "the chord as a number in the key (work out which chord it is)",
+               "none": "nothing: play it from memory"}[self.cue]
+        steps = [f"I count you in for two bars: first slow clicks, then {self.bpb} clicks with a big "
+                 f"1 2 3 4 on screen. Your first chord comes right after the last click."]
+        if self.listen_passes:
+            steps.append("The first time round, I play the piano part. Just listen and watch the lane.")
+        steps += [
+            f"Then it's your turn. Play the chord on each beat marked ■ in the lane ({self.pattern.name.lower()}). "
+            f"The screen shows {cue}.",
+            f"Count: {self.pattern.counting}",
+            "If I don't hear you play, the band stops and waits. Nothing is lost.",
+            "Does the moving line reach a beat before you hear it? Press . to move it later (, earlier).",
+            f"Tempo {self.bpm:.0f} BPM. [ slows down, ] speeds up.",
+        ]
+        why = f"{self.pattern.name}: {self.pattern.about} " + progression_why(self.prog, self.key)
+        return f"Play along with the band: {self.prog.name} in {self.key.name}", why, steps
+
     def _schedule(self, now):
-        self.t0 = now + 0.5
+        self.t0 = now + 1.0
         events: list[NoteEvent] = []
         for beat in range(self.count_in):
-            events.append(NoteEvent(self.time_of(beat), CLICK_HI if beat == 0 else CLICK_LO, 100, 0.05, "drums"))
+            if beat < self.bpb and beat % 2:  # first bar: "1 . 2 ." style slow clicks
+                continue
+            events.append(NoteEvent(self.time_of(beat), CLICK_HI if beat % self.bpb == 0 else CLICK_LO, 100,
+                                    0.05, "drums"))
         groove = GROOVES.get(self.groove, GROOVES["ballad"])
         bars = int((self.total_beats - self.count_in) / self.bpb)
         for bar in range(bars):
@@ -355,11 +410,25 @@ class PlayAlongExercise(Exercise):
         else:
             self.status[hit.target] = "early" if hit.error < 0 else "late"
 
+    def released(self, now):
+        if not self.armed:
+            self.armed = True
+            self.say("Here we go. Listen for the count-in.", "info")
+
+    def _reset(self):
+        """Stop the band and wait, as if the exercise had not started."""
+        self.ctx.stop_backing()
+        self.t0 = None
+        self.hits.clear()
+        self.errors.clear()
+        self.status = ["upcoming"] * len(self.expected)
+        self.armed = False
+
     def tick(self, now):
         if self.done:
             return
         if self.t0 is None:
-            if not self.ctx.held:
+            if not self.ctx.held and self.armed:
                 self._schedule(now)
             return
         window = min(0.45, 0.4 * self.spb)
@@ -379,6 +448,14 @@ class PlayAlongExercise(Exercise):
         self.ctx.stop_backing()
 
     def _complete(self, now):
+        if not any(s not in ("missed", "upcoming") for s in self.status):
+            # Nothing played during the learner's turn: not a result, just
+            # not ready yet. Wait instead of grading and moving on.
+            self.empty_passes += 1
+            self._reset()
+            self.say("I didn't hear you play, and that's fine. Play any key when you're ready to try again "
+                     "(H keeps the chord names on screen, [ slows down).", "warn")
+            return
         total = len(self.expected) or 1
         on_time = sum(1 for s in self.status if s in ("good", "ok")) / total
         played = [s for s in self.status if s not in ("missed", "upcoming")]
@@ -409,7 +486,9 @@ class PlayAlongExercise(Exercise):
         self.finish(now, grade, score, summary, details)
 
     def view(self, now) -> View:
-        beat = self.beat_at(now)
+        # Draw at the moment the learner hears, not when audio was scheduled:
+        # the calibrated offset covers the device's output delay.
+        beat = self.beat_at(now - self.ctx.timing_offset)
         index = self.chord_index_at(max(beat, self.count_in))
         _, _, roman, current = self.chords[index]
         cue = "symbols" if self.revealed else self.cue
@@ -419,12 +498,16 @@ class PlayAlongExercise(Exercise):
         local = (index % per_pass)
         cells = [cue_cell(cue, r, c.symbol) for r, c in
                  zip(self.prog.romans, self.prog.chords(self.key))]
-        if self.t0 is None:
+        if self.t0 is None and not self.armed:
+            phase_text = self.feedback
+        elif self.t0 is None:
             phase_text = "Get ready"
         elif beat < 0:
             phase_text = "Get ready"
+        elif beat < self.count_in - self.bpb:
+            phase_text = "Get ready: count-in"
         elif beat < self.count_in:
-            phase_text = f"Count-in {int(beat) + 1}"
+            phase_text = f"Count-in {int(beat) % self.bpb + 1} of {self.bpb}"
         elif listening:
             phase_text = "Listen: the band and the example"
         else:
@@ -445,8 +528,9 @@ class PlayAlongExercise(Exercise):
                     b = bar_start + onset
                     if start <= b < start + length and window_start <= b < window_start + 2 * self.bpb:
                         expected.append((b, "example"))
-        strays = [self.beat_at(h.time) for h in self.hits
-                  if h.target is None and window_start <= self.beat_at(h.time) < window_start + 2 * self.bpb]
+        offset = self.ctx.timing_offset
+        strays = [self.beat_at(h.time - offset) for h in self.hits
+                  if h.target is None and window_start <= self.beat_at(h.time - offset) < window_start + 2 * self.bpb]
         labels = [(start, cue_cell(cue, r, c.symbol)) for start, _, r, c in self.chords
                   if window_start <= start < window_start + 2 * self.bpb]
         lane = LaneView(self.bpb, window_start, 2 * self.bpb, beat, expected, strays, labels, phase_text)
@@ -462,7 +546,16 @@ class PlayAlongExercise(Exercise):
             big, caption = roman, ""
         else:
             big, caption = "♪", f"bar {int((beat - self.count_in) // self.bpb) % len(self.prog.bars) + 1}" if beat >= self.count_in else ""
-        lesson = f"{self.pattern.about}  Count: {self.pattern.counting}"
+        if self.t0 is not None and 0 <= beat < self.count_in:
+            first = self.chords[0]
+            upcoming = cue_cell(cue, first[2], first[3].symbol)
+            if beat >= self.count_in - self.bpb:
+                big = str(int(beat) % self.bpb + 1)
+                caption = f"first chord: {upcoming}" if upcoming != "·" else "first chord coming"
+            else:
+                big, caption = (upcoming if upcoming != "·" else "♪"), "get ready"
+        lesson = (f"{self.pattern.about}  Count: {self.pattern.counting}\n"
+                  f"Line ahead of the sound? . moves it later, , earlier (now {self.ctx.timing_offset * 1000:+.0f} ms).")
         return View(block=self.block, title=f"Play along · {self.pattern.name}", big=big, caption=caption,
                     lesson=lesson, key=f"Key: {self.key.name} · {self.bpm:.0f} BPM", piano=piano, chart=chart,
                     lane=lane, feedback=self.feedback if beat < self.count_in else phase_text,

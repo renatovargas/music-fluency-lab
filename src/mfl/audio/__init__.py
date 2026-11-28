@@ -8,9 +8,13 @@ import time
 from mfl.audio.engine import Engine, NoteEvent
 from mfl.audio.instruments import PLAYABLE, build_instruments
 
+DEFAULT_LATENCY = 0.045  # seconds of output buffer; raise it if you hear dropouts
+MIN_LATENCY = 0.03  # below this a Python callback cannot keep up while the screen redraws
+MAX_LATENCY = 0.3
+
 INSTRUMENT_NAMES = {key: inst.name for key, inst in build_instruments().items() if key in PLAYABLE}
 
-__all__ = ["AudioOut", "Engine", "INSTRUMENT_NAMES", "NoteEvent", "NullAudio", "PLAYABLE", "open_audio"]
+__all__ = ["DEFAULT_LATENCY", "MAX_LATENCY", "MIN_LATENCY", "AudioOut", "Engine", "INSTRUMENT_NAMES", "NoteEvent", "NullAudio", "PLAYABLE", "open_audio"]
 
 
 class NullAudio:
@@ -22,7 +26,7 @@ class NullAudio:
 
     def __init__(self):
         self.keys_instrument = "piano"
-        self.volume = 0.85
+        self.volume = 1.0
 
     def note_on(self, note, velocity, source="live", instrument="keys"):
         pass
@@ -43,7 +47,7 @@ class NullAudio:
         self.keys_instrument = key
 
     def set_volume(self, volume):
-        self.volume = max(0.0, min(1.5, volume))
+        self.volume = max(0.0, min(2.0, volume))
 
     @property
     def peak(self):
@@ -58,7 +62,7 @@ class AudioOut:
 
     available = True
 
-    def __init__(self, instrument: str = "piano", volume: float = 0.85):
+    def __init__(self, instrument: str = "piano", volume: float = 1.0, latency: float = DEFAULT_LATENCY):
         import sounddevice as sd
 
         # Let the audio callback take the GIL promptly while the UI renders.
@@ -69,17 +73,42 @@ class AudioOut:
         self.name = device["name"]
         self.engine = Engine(rate, instrument=instrument, volume=volume)
         self.underflows = 0
-        self._latency = 0.02
-        self.stream = sd.OutputStream(
-            samplerate=rate, channels=self.channels, dtype="float32", blocksize=self.engine.block,
-            latency="low", callback=self._callback,
+        self.rate = rate
+        self.requested_latency = max(MIN_LATENCY, min(MAX_LATENCY, latency))
+        self._latency = self.requested_latency
+        self.stream = self._open_stream(self.requested_latency)
+
+    def _open_stream(self, latency: float):
+        import sounddevice as sd
+
+        # v0.5 asked for 256-frame callbacks at PortAudio's "low" latency: a
+        # ~6 ms deadline that a Python callback misses whenever the UI holds
+        # the interpreter, heard as crackles. Let the host pick the callback
+        # size (blocksize 0) and keep a larger safety buffer.
+        stream = sd.OutputStream(
+            samplerate=self.rate, channels=self.channels, dtype="float32", blocksize=0,
+            latency=latency, callback=self._callback,
         )
         try:
-            self._latency = float(self.stream.latency)
-            self.stream.start()
+            self._latency = float(stream.latency)
+            stream.start()
         except Exception:
-            self.stream.close()
+            stream.close()
             raise
+        return stream
+
+    def reopen(self, latency: float) -> float:
+        """Restart the output with a different buffer size (the engine and
+        everything it is playing carry on)."""
+        latency = max(MIN_LATENCY, min(MAX_LATENCY, latency))
+        old = self.stream
+        try:
+            old.stop()
+        finally:
+            old.close()
+        self.requested_latency = latency
+        self.stream = self._open_stream(latency)
+        return latency
 
     def _callback(self, outdata, frames, time_info, status):
         now = time.perf_counter()
@@ -140,6 +169,6 @@ class AudioOut:
             self.stream.close()
 
 
-def open_audio(instrument: str = "piano", volume: float = 0.85):
+def open_audio(instrument: str = "piano", volume: float = 1.0, latency: float = DEFAULT_LATENCY):
     """Open the default output, raising on failure so callers can report it."""
-    return AudioOut(instrument, volume)
+    return AudioOut(instrument, volume, latency)

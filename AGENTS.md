@@ -27,7 +27,77 @@ The owner is an experienced programmer/economist, not a beginning musician. He c
 
 The original handover was prepared on 2026-11-24 from the v0.2.0 ZIP. The owner successfully ran v0.1 and v0.2 on Fedora. v0.1 felt like an examiner, and v0.2 introduced guidance but required an intermediate click that made it unclear when to play. v0.3 removed the click, and v0.4 added sound. The v0.4 feedback (too quiet; a double sound after blind recall) was addressed in v0.5, which the current checkout implements. Inspect the working tree and tests before editing, and preserve unrelated owner changes.
 
-### Current implementation (v0.5.0)
+### v0.6 feedback and response (2026-11-27)
+
+The owner's first v0.5 session reported: sound "choppy and muddy, like an old torn speaker"; volume stuck at 85% (the keys weren't discoverable, and turning it up made no difference behind the limiter); exercise explanations too cryptic; phases advancing without him; no way to go back; too fast for his level ("I can memorize a song's chords, but I can't just look at things and go"). He needs more hand-holding.
+
+v0.6 response:
+- **Gain staging.** `MASTER_GAIN` 3.2 → 1.6 with a smooth limiter and a soft knee above 0.8, replacing the always-on tanh.
+- **Audio buffer.** 45 ms with `blocksize=0`, replacing 256 frames at "low" latency. This was measured: 71 dropouts in 4 s under UI-like load, now none. Use `--latency` to raise it, and the status line shows a dropout count.
+- **Samples.** Cached samples preload at startup.
+- **Intro cards.** Every new kind of exercise opens with `Exercise.intro()`, which waits for a key.
+- **New chords.** Teach-first (guided → recall); the timed probe is removed.
+- **Play-along.** Waits instead of grading an untouched pass.
+- **Tempo.** A global tempo scale (`[ ]`, `tempo_scale` setting, default 0.85).
+- **Navigation.** `B` goes back and `R` repeats, including from the result screen.
+- **Pacing.** `MAX_NEW` is 3.
+
+Settings: `output_volume` replaces `volume`, plus `audio_latency` and `tempo_scale`. Still unverified by ear: whether the piano timbre itself sounds good once distortion is gone.
+
+### v0.7 feedback and response (2026-11-27)
+
+The owner reported that v0.6 was "even muddier, even after `mfl --latency 0.08`". His saved `audio_latency` was actually 0.01, so his audio was crackling. He also reported:
+- the play-along lane was out of sync with the audio, so hits that matched the sound were marked red;
+- the first chord came without warning, and he wanted a count-in;
+- the intros should add one sentence of context: what the item is, where it's used, and which scale it comes from;
+- he asked how to change sounds (`I`) and requested an accordion.
+
+v0.7 response:
+- **Piano.** Retuned with measured spectral targets. Middle C's centroid was 290–370 Hz and is now about 510–820 Hz. `TILT` and `HIGH_DECAY_HZ` are in `instruments.py`, and `RENDER_VERSION` is 6.
+- **Audio buffer.** Floor of 30 ms. On 3 or more dropouts in 2 s the buffer is raised by 1.5×, both live (`AudioOut.reopen`) and in the saved setting.
+- **Sound check.** A tap-along sync exercise (`exercises/sync.py`) stores `sync`: `{offset, latency}`. It is auto-inserted before the first play-along when missing or when the buffer changed. The play-along lane is drawn at `now - timing_offset`, and the clamp is ±250 ms.
+- **Count-in.** Two bars, with big beat numbers on screen and the first chord named.
+- **Intros.** `Exercise.intro()` now returns `(heading, why, steps)`.
+- **Accordion.** Added to `PLAYABLE`.
+
+Still unverified by ear: the retuned piano and accordion timbres, and whether the measured sync matches his experience.
+
+### v0.8 feedback and response (2026-11-27)
+
+The owner reported:
+- the synth piano is clearer but toy-like, and some notes were very faint;
+- he accepted downloading a free sampled piano;
+- the lane was "an eighth early" against the sound;
+- he likes the accordion;
+- the scale-degree exercise needed an anchor ("play this note, and we'll go from there").
+
+His data showed `sync` offset 35 ms and then 1 of 16 hits within the windows. The v1 sync dots advanced at scheduled times, so eyes could lead his taps.
+
+v0.8 response:
+- **Velocity.** `velocity_gain()` floor, so the softest touch is about −11 dB instead of −24 dB.
+- **Sampled piano.** `mfl/audio/soundfont.py`, a minimal SF2 reader, plus `SoundFontPiano` (instrument key `grand`). `mfl get-piano` downloads the YDP grand into `$XDG_DATA_HOME/mfl/sounds`, verified by SHA-256, with CC-BY attribution in the README. The sampled piano is first in `PLAYABLE` when installed, and the synth piano is renamed "Synth piano". The SF2 has 5 velocity layers; the engine uses soft (vel 52) and hard (vel 112).
+- **Sound check v2.** Nothing on screen is synced to the clicks. Clicks run at 60 BPM, taps are assigned to the preceding click (delays −0.2 to +0.8 s), uneven tapping (spread over 150 ms) is retried, `sync.version` is 2, and `timing_offset` is clamped to −0.2…0.8 s.
+- **Manual nudge.** `.`/`,` call `Practice.nudge_timing`.
+- **Degree exercise.** A teach phase comes first: an anchor on do, then each note for new sets with `DEGREE_MEANING`. Quiz rounds always play the tonic before the target and mark the options when there are 4 or fewer, or when the set is new.
+- **Test isolation.** `tests/conftest.py` isolates XDG directories.
+
+Still unverified: how the sampled piano sounds to the owner, and whether sync v2 plus the nudge resolves the lane offset. If the lane is still off after the check, the next suspect is the TUI frame timing.
+
+### v0.9 feedback and response (2026-11-27)
+
+The owner said v0.8 sounds smoother and progression walks flow better. The echo exercise was still confusing: "sing it in your head" was ambiguous between the cadence and the melody, there was no sense of key or starting point, and searching for a note entered wrong answers that reset progress. He asked for: "play the scale starting from here, set the tonic, then do the exercise."
+
+v0.9 response:
+- **Orientation phase.** `EchoExercise` opens with the scale played up from the tonic; the learner plays it with the next key lit, and wrong keys are free.
+- **Rounds.** Rounds play the melody only, with no cadence. `make_phrase` is confined to tonic…tonic+12, and the scale keys stay labelled with solfege. The first note is lit.
+- **Wrong notes.** A wrong note keeps the learner's position and replays the melody. A second miss lights only the next note.
+- **Key labels.** `render.piano` white-key labels can use up to w−1 characters.
+
+The same principle (orient in the key with the hands before testing) should guide any future ear exercise.
+
+v0.9.1: the owner tried to imitate the next exercise's key-setting cadence, thinking it was part of the finished one. Fixes: a dedicated "Exercise complete" between-screen (`TRANSITION` is 3 s), and cadences labelled listen-only via `KEY_CHORDS_NOTE`. Any sound the learner should *not* imitate must be labelled as such.
+
+### Current implementation (v0.5.0 base, see v0.6–v0.9 above)
 
 v0.5 (2026-11-27) replaced the fixed seven-chord lesson with a daily adaptive coach. See `README.md` and `CHANGELOG.md`.
 
@@ -52,7 +122,7 @@ v0.5 (2026-11-27) replaced the fixed seven-chord lesson with a daily adaptive co
   - CPU is about 11–17% of one core with 10 voices. No underflows were observed during cold sample rendering on Omarchy.
 - **MIDI:** rtmidi callback with perf_counter timestamps, CC64 as the pedal, channel-10 notes as pads (they play drums and are ignored by exercises), and reconnect retries every 2 s.
 - **Storage:** `PRAGMA user_version` 1 adds `skills`, `results`, `sessions` and `settings`. The legacy `attempts` table is preserved, and legacy successful recalls seed `chord/<symbol>` skills.
-- **Tests:** 47 tests with fake MIDI, fake audio and temporary databases (`tests/helpers.py` has `FakeAudio`, `Clock` and `Rig`).
+- **Tests:** 65 tests with fake MIDI, fake audio and temporary databases (`tests/helpers.py` has `FakeAudio`, `Clock` and `Rig`).
 
 ### Hardware status and next task
 

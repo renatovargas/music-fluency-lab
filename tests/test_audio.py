@@ -35,7 +35,7 @@ def fundamental_strength(signal, rate, hz):
     return near / spectrum.max()
 
 
-@pytest.mark.parametrize("key", ["piano", "epiano", "organ", "pad"])
+@pytest.mark.parametrize("key", ["piano", "epiano", "accordion", "organ", "pad"])
 def test_instruments_play_in_tune_and_release(engine, key):
     engine.set_instrument(key)
     engine.note_on(69, 100)
@@ -48,6 +48,28 @@ def test_instruments_play_in_tune_and_release(engine, key):
     assert not engine.voices
     tail = render(engine, 2.0)  # reverb dies away
     assert np.abs(tail).max() < 1e-3
+
+
+def test_normal_playing_stays_clean_and_volume_is_audible():
+    """v0.5 kept the limiter ~6 dB down on ordinary chords (distortion)."""
+    e = Engine(48000, disk_cache=False, warm=False)
+    for root in (45, 48, 51, 54, 57, 60, 63, 66, 69):
+        for layer in (0, 1):
+            e.banks["piano"].ensure(root, layer)
+    e.offset = 0.0
+    for n in (48, 60, 64, 67):
+        e.note_on(n, 90)
+    out = render(e, 1.0)
+    assert e.limiter > 0.97 and np.abs(out).max() < 0.95
+    louder = np.sqrt(np.mean(out ** 2))
+    for n in (48, 60, 64, 67):
+        e.note_off(n)
+    render(e, 3.0)
+    e.set_volume(0.6)
+    for n in (48, 60, 64, 67):
+        e.note_on(n, 90)
+    quiet = np.sqrt(np.mean(render(e, 1.0) ** 2))
+    assert louder > quiet * 1.5, "the volume control changes loudness"
 
 
 def test_neighbouring_notes_are_resampled(engine):

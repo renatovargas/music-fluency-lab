@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+TILT = (1.25, 0.85)  # partial amplitude ~ k^-tilt for the soft and hard layers
+HIGH_DECAY_HZ = 2200.0  # partials above this die away progressively faster
 SAMPLE_STEP = 3  # render every minor third, resample the notes in between
 LOW_NOTE, HIGH_NOTE = 21, 108
 
@@ -74,15 +76,18 @@ class GrandPiano(Instrument):
     felt thump. Velocity changes brightness as well as level."""
 
     def __init__(self):
-        super().__init__("piano", "Grand piano", release=0.28, reverb_send=0.30, gain=1.0)
+        super().__init__("piano", "Synth piano", release=0.28, reverb_send=0.30, gain=1.0)
 
     def render(self, note: int, layer: int, rate: int) -> np.ndarray:
         rng = np.random.default_rng(note * 7 + layer)
         f0 = hz(note)
         duration = float(np.clip(7.5 - (note - 21) * 0.075, 1.3, 7.5))
         inharmonicity = 0.00006 * 2 ** ((note - 40) / 14)
-        tilt = 2.1 if layer == 0 else 1.25
-        ceiling = min(0.45 * rate, 7000 if layer == 0 else 12000)
+        # Spectral tilt and decay were retuned in v0.7: v0.6's piano had a
+        # centroid barely above the fundamental (dull, "muddy"). Targets: a
+        # mezzo-forte C4 centred near 0.9-1.2 kHz with real energy above 2 kHz.
+        tilt = TILT[layer]
+        ceiling = min(0.45 * rate, 9000 if layer == 0 else 15000)
         max_partials = 64 if note < 48 else 40
         partials = []
         for k in range(1, max_partials + 1):
@@ -106,7 +111,7 @@ class GrandPiano(Instrument):
             amp = k ** -tilt * (0.3 + 0.7 * abs(np.sin(np.pi * k * strike)))
             if amp < 0.002:
                 continue
-            tau = sustain / (1 + (fk / 1000) ** 1.25)
+            tau = sustain / (1 + (fk / HIGH_DECAY_HZ) ** 1.1)
             # Only compute this partial until it has decayed below audibility.
             length = min(n, int(tau * np.log(max(amp * 0.3 / 2e-5, 1.0)) * sub_rate) + 1)
             t = t_full[:length]
@@ -331,8 +336,56 @@ class Pad(WavetableInstrument):
         return saw + [(1, 0.3)] if note > 52 else saw
 
 
-PLAYABLE = ("piano", "epiano", "organ", "pad")
+class Accordion(WavetableInstrument):
+    """Musette accordion: three free reeds per note, one in tune and two
+    detuned either side, which beat against each other for the shimmering
+    sound of Latin, norteño and French accordion. A reed's spectrum is rich
+    and nasal (strong harmonics with a formant around 1–2 kHz). The bellows
+    give a soft, quick swell instead of a struck attack."""
+
+    detune_cents = (-13.0, 0.0, 12.0)
+    attack = 0.035
+    decay = 0.6
+    sustain_level = 0.88
+
+    def __init__(self):
+        super().__init__("accordion", "Accordion (musette)", sustained=True, release=0.07, bus="dry",
+                         reverb_send=0.2, gain=0.28, layers=(1,))
+
+    def harmonics(self, note, rate):
+        f0 = hz(note)
+        result = []
+        for k in range(1, 40):
+            fk = k * f0
+            if fk > 9000:
+                break
+            formant = 1 + 1.4 * float(np.exp(-((np.log2(fk / 1400)) ** 2) / 0.5))
+            odd = 1.0 if k % 2 else 0.7  # reeds are a little stronger on odd partials
+            result.append((2 * k, k ** -0.85 * formant * odd))
+        return result
+
+    def transient(self, note, layer, rate):
+        # A breath of reed noise as the bellows open.
+        n = int(0.04 * rate)
+        t = np.arange(n) / rate
+        noise = _lowpassed_noise(n, rate, np.random.default_rng(note), 3000.0)
+        return (0.03 * noise / (np.abs(noise).max() + 1e-9) * np.exp(-t / 0.012)).astype(np.float32)
+
+
+SYNTH_PLAYABLE = ("piano", "epiano", "accordion", "organ", "pad")
+
+
+def _sampled() -> list[Instrument]:
+    from mfl.audio.soundfont import SoundFontPiano, installed_piano
+
+    path = installed_piano()
+    return [SoundFontPiano(path)] if path is not None else []
 
 
 def build_instruments() -> dict[str, Instrument]:
-    return {i.key: i for i in (GrandPiano(), ElectricPiano(), Organ(), Pad(), Bass(), Drums())}
+    return {i.key: i for i in (*_sampled(), GrandPiano(), ElectricPiano(), Accordion(), Organ(), Pad(), Bass(),
+                               Drums())}
+
+
+# The sampled grand (after ``mfl get-piano``) comes first when installed.
+PLAYABLE = tuple(k for k in ("grand", *SYNTH_PLAYABLE) if k in build_instruments())
